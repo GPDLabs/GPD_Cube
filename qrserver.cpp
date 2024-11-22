@@ -574,16 +574,6 @@ void QRServer::processReceivedData(const QByteArray &data) {
                     {
                         waitForNextPacketTimer->stop();
                     }
-                    //发送完删除随机数和签名文件
-                    for (int fileNumber = 1; fileNumber <= walletAddrCount; ++fileNumber) {
-                        QString strkeyNo = QString::number(fileNumber);
-                        QString signedhashpath = currentPath + "/QR-drbgaesrandomhash" + strkeyNo + ".txt.sig";
-                        QFile::remove(signedhashpath);
-                        QString signedrandompath = currentPath + "/QR-drbgaesrandom" + strkeyNo + ".txt.sig";
-                        QFile::remove(signedrandompath);
-                    }
-                    QString keydrbgrandomhashsigpath = currentPath + "/QR-drbgaesrandomhashsig.txt";
-                    QFile::remove(keydrbgrandomhashsigpath);
                 }
             }else
             {
@@ -602,6 +592,18 @@ void QRServer::processReceivedData(const QByteArray &data) {
                 endTimer->stop();
             }
             qDebug()<<"停止生成随机数和摇号定时器";
+            //删除随机数和签名文件
+            for (int fileNumber = 1; fileNumber <= walletAddrCount; ++fileNumber) {
+                QString strkeyNo = QString::number(fileNumber);
+                QString signedhashpath = currentPath + "/QR-drbgaesrandomhash" + strkeyNo + ".txt.sig";
+                QFile::remove(signedhashpath);
+                QString signedrandompath = currentPath + "/QR-drbgaesrandom" + strkeyNo + ".txt.sig";
+                QFile::remove(signedrandompath);
+            }
+            QString keydrbgrandomhashsigpath = currentPath + "/QR-drbgaesrandomhashsig.txt";
+            QFile::remove(keydrbgrandomhashsigpath);
+            qDebug()<<"删除随机数和签名文件";
+
             QString luckylotteryTime = jsonObjreceiveTCPDatabody["lotteryTime"].toString();
             QString luckyqrId = jsonObjreceiveTCPDatabody["qrId"].toString();
             QString luckywalletAddr = jsonObjreceiveTCPDatabody["walletAddr"].toString();
@@ -798,15 +800,15 @@ void QRServer::hashSig()
     QByteArray allHashes;
     hashfileExists = false;
 
-    for (int fileNumber = 1; fileNumber <= walletAddrCount; ++fileNumber) {
-        QString strkeyNo = QString::number(fileNumber);
-        QString drbgaesrandomhashpath = currentPath + "/QR-drbgaesrandomhash" + strkeyNo + ".txt"; // drbghash路径
-        QString sighashpath = drbgaesrandomhashpath + ".sig";
+    QString drbgaesrandomhashpath = currentPath + "/QR-drbgaesrandomhash" + strkeyNo + ".txt"; // drbghash路径
+    QString sighashpath = drbgaesrandomhashpath + ".sig";
+    QFile randomhashfile(drbgaesrandomhashpath);
+    QFile sighashfile(sighashpath);
+    if (randomhashfile.exists()){  // 如果randomhash文件存在
+        hashfileExists = true;// 至少有一个存在，设置为true
+        for (int fileNumber = 1; fileNumber <= walletAddrCount; ++fileNumber) {
+            QString strkeyNo = QString::number(fileNumber);
 
-        QFile randomhashfile(drbgaesrandomhashpath);
-        QFile sighashfile(sighashpath);
-        if (randomhashfile.exists()){  // 如果randomhash文件存在
-            hashfileExists = true;// 至少有一个存在，设置为true
             if (sighashfile.exists()) {
                 if (sighashfile.remove()) {
                     if (!randomhashfile.rename(sighashpath)) {
@@ -823,67 +825,61 @@ void QRServer::hashSig()
                     return;
                 }
             }
-        } else {
-            if (sighashfile.exists()) {
-                if (sighashfile.remove()) {
-                    qDebug() << "已删除存在的文件";
+
+            if (!sighashfile.open(QIODevice::ReadOnly)) {
+                continue;
+            }
+
+            allHashes.append(sighashfile.readAll());
+            sighashfile.close();
+
+            updateFileStatus(StatusPath, fileNumber, 2);//随机数哈希状态更新为2，表示已使用签名
+
+            QString keydrbgrandompath = currentPath + "/QR-drbgaesrandom" + strkeyNo + ".txt";
+            QFile randomfile(keydrbgrandompath);
+            QString sigrandompath = keydrbgrandompath + ".sig";
+            QFile sigrandomfile(sigrandompath);
+            if (sigrandomfile.exists()) {
+                if (sigrandomfile.remove()) {
+                    if (!randomfile.rename(sigrandompath)) {
+                        qDebug() << "重命名失败";
+                        return;
+                    }
                 } else {
                     qDebug() << "无法删除已存在的文件";
+                    return;
                 }
-            }
-        }
-
-        if (!sighashfile.open(QIODevice::ReadOnly)) {
-            continue;
-        }
-
-        allHashes.append(sighashfile.readAll());
-        sighashfile.close();
-
-        updateFileStatus(StatusPath, fileNumber, 2);//随机数哈希状态更新为2，表示已使用签名
-
-        QString keydrbgrandompath = currentPath + "/QR-drbgaesrandom" + strkeyNo + ".txt";
-        QFile randomfile(keydrbgrandompath);
-        QString sigrandompath = keydrbgrandompath + ".sig";
-        QFile sigrandomfile(sigrandompath);
-        if (sigrandomfile.exists()) {
-            if (sigrandomfile.remove()) {
+            } else {
                 if (!randomfile.rename(sigrandompath)) {
                     qDebug() << "重命名失败";
                     return;
                 }
-            } else {
-                qDebug() << "无法删除已存在的文件";
-                return;
-            }
-        } else {
-            if (!randomfile.rename(sigrandompath)) {
-                qDebug() << "重命名失败";
-                return;
             }
         }
-    }
-    QByteArray finalHash = QCryptographicHash::hash(allHashes, QCryptographicHash::Sha256);
+        QByteArray finalHash = QCryptographicHash::hash(allHashes, QCryptographicHash::Sha256);
 
-    QByteArray send_SH;
-    send_SH.resize(3);
-    send_SH[0]= 0x53;//S
-    send_SH[1]= 0x48;//H
-    send_SH[2]= 1;
-    global_port.write(send_SH + finalHash);
+        QByteArray send_SH;
+        send_SH.resize(3);
+        send_SH[0]= 0x53;//S
+        send_SH[1]= 0x48;//H
+        send_SH[2]= 1;
+        global_port.write(send_SH + finalHash);
 
-    connect(&global_port,&QSerialPort::readyRead,this,[=](){
-        QString keydrbgrandomhashsigpath = currentPath + "/QR-drbgaesrandomhashsig.txt";//drbghash签名文件路径
-        QByteArray arrdrbgRandomhashSig = global_port.readAll();
-        QFile hashsigfile(keydrbgrandomhashsigpath);
-        hashsigfile.open(QFile::WriteOnly);
-        hashsigfile.write(arrdrbgRandomhashSig);
-        hashsigfile.close();
+        connect(&global_port,&QSerialPort::readyRead,this,[=](){
+            QString keydrbgrandomhashsigpath = currentPath + "/QR-drbgaesrandomhashsig.txt";//drbghash签名文件路径
+            QByteArray arrdrbgRandomhashSig = global_port.readAll();
+            QFile hashsigfile(keydrbgrandomhashsigpath);
+            hashsigfile.open(QFile::WriteOnly);
+            hashsigfile.write(arrdrbgRandomhashSig);
+            hashsigfile.close();
 
-        disconnect(&global_port,&QSerialPort::readyRead,this,nullptr);
-        global_port.close();
+            disconnect(&global_port,&QSerialPort::readyRead,this,nullptr);
+            global_port.close();
+            lotteryStart();
+        });
+    }else{
         lotteryStart();
-    });
+    }
 }
 void QRServer::lotteryStart(){
     jsonObjsendTCPDatabody["lotteryStart"] = strlotteryTime;

@@ -38,7 +38,7 @@ void outputLog(QtMsgType type, const QMessageLogContext &context, const QString 
     QString current_date = QDateTime::currentDateTime().toString("yyyy-MM-dd");
     QString message = QString("%1 %2 %3").arg(current_datetime).arg(text).arg(msg);//.arg(context_info).arg(msg);
 
-    QString logName = QString("QR-log_%1.txt").arg(current_date);
+    QString logName = QString("log_%1.txt").arg(current_date);
     QFile file(logName);
     if (file.open(QIODevice::WriteOnly | QIODevice::Append)) {
         QTextStream text_stream(&file);
