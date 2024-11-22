@@ -1,0 +1,6 @@
+{
+    "files.associations": {
+        "ctr_drbg_tests.h": "c"
+    },
+    "C_Cpp.errorSquiggles": "disabled"
+}
