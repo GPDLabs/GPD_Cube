@@ -954,13 +954,13 @@ int nist_randomness_evaluate(unsigned char *rnd)
         }
 	}
 
-    for (i = 2; i < 16; i++) {
+    for (i = 1; i < 16; i++) {
         //bypass test08.
         if (i == 8) {
             continue;
         }
         p_value = pf[i - 1](n);
-        printf("p_value = %.100f\n", p_value);//输出保留小数点后100位
+//        printf("p_value = %.10f\n", p_value);//输出保留小数点后10位
         if (p_value < ALPHA) {
             free(epsilon);
 

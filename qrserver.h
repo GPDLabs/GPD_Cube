@@ -19,11 +19,18 @@
 #include <QStandardPaths>
 #include <QDir>
 #include <QCryptographicHash>
+#include <QtNetwork/qtcpserver.h>
+#include <QtNetwork/qtcpsocket.h>
+#include <QTimer>
+#include <QTime>
+#include <wiringPi.h>
+#include <signal.h>
 
 static const QLatin1String serviceUuid("e8e10f95-1a70-4b27-9ccf-02010264e9c8");
 extern "C" {
-    int nist_randomness_evaluate(unsigned char* rnd);
+int nist_randomness_evaluate(unsigned char* rnd);
 }
+
 class QRServer : public QObject
 {
     Q_OBJECT
@@ -32,28 +39,31 @@ public:
     explicit QRServer(QObject *parent = nullptr);
 
     ~QRServer();
-//        QRServer(): ETHaddr(""),ETHaddrchecksum(""){}
+
     void startServer(const QBluetoothAddress &localAdapter = QBluetoothAddress());
     void stopServer();
-    void Openwifi();//打开wifi
-    void OpenPort();//打开串口
-    void AddKey();//生成密钥
-    void DecompressKey();//解压密钥
-    void OutputRandom();//输出随机数
-    void ReadRandomFile();//读取随机数文件
-//    QString ETHaddr;
-//    QString ETHaddrchecksum;
-//    QString keccak_256(const QString &input);
-//    QString Erc55checksum(const QString &address);
-//    QByteArray DPKey;
-//    QString strDPKey;
-//    QString pubkey;
-//    QByteArray pubKey;
-//    QString strKey;
-
-public slots:
-    void sendMessage(const QString &message);
-
+    void openwifi();
+    void getwalletAddr();
+    void walletAddrSig();
+    void getwalletAddrSig();
+    void addKey();
+    void decompressKeytowalletAddr();
+    void getRandom();
+    void getDrbgRandom();
+    void testRandomFile();
+    void hashSig();
+    void saveHashToFile(const QString &hashvalue, const QString &hashfilepath);
+    void startTcp();
+    void ipfileExists();
+    void processReceivedData(const QByteArray &data);
+    void loginVqr();
+    void registerWallet();
+    void getLotteryTime();
+    void lotteryStart();
+    void lotteryResult();
+    void initializeFileStatus(const QString &filePath);
+    void updateFileStatus(const QString &filePath, int fileNumber, int status);
+    QVector<int> readProcessedFileNumbers(const QString &filePath);
 
 signals:
     void messageReceived(const QString &sender, const QString &message);
@@ -63,48 +73,91 @@ signals:
 private slots:
     void clientConnected();
     void clientDisconnected();
-    void readSocket();
+    void readBTSocket();
+
+    void handleTcpSocketError(QAbstractSocket::SocketError);
+    void handleTcpSocketReadyRead();
+    void handleTcpSocketDisconnect();
+    void vqrserverTimeout();
+    void tcpConnected();
+
+    void onEndTimeReached();
 
 private:
+    QRServer *server;
     QBluetoothServer *m_rfcommServer;
     QBluetoothServiceInfo m_serviceInfo;
     QList<QBluetoothSocket *> m_clientSockets;
-    QString currentPath = QDir::currentPath();//当前文件夹路径
 
-    QSerialPort global_port;//端口函数
+    QTcpSocket *m_TcpSocket;
+    QString macAddress;
+    QString vqrServerIP;
+    QString vqrServerIPfile;
+    quint16 vqrServerPort;
 
-    QString pubkeyfile; //未解压公钥文件保存路径
-    QByteArray arrKey;
-    QString strKey;
+    QSerialPort global_port;
 
-    QString DPpubkeyfile; //解压公钥文件保存路径
-    QByteArray arrDPKey;
-    QString strDPKey;
+    QString currentPath = QDir::currentPath();
+    QString walletAddrPath;
+    QString walletAddrsigPath;
+    QString n_drbgrandomPath;
+    QString n_drbgrandomhashPath;
+    QString StatusPath;
 
-    QString randomfile;//随机数文件保存路径
-    QByteArray Random;
-    QByteArray arrRandom;//读取的随机数
-    qintptr RandomSize;//读取的随机数字节数
-    QString strRandom;
-
-    QJsonDocument jsonDocreceive;//收到的json格式文档
-    QJsonObject jsonObjreceive;//收到的json格式对象
-    QJsonObject jsonObjreceivebody;//收到的body对象
-    QJsonObject jsonObjreceiveheader;//收到的header对象
-    QJsonObject jsonObjreceivemessagedata;//收到的body里messagedata对象
-
-    QJsonDocument jsonDocsend;//发送的json格式文档
-    QJsonObject jsonObjsend;//发送的json格式对象
-    QJsonObject jsonObjsendbody;//发送的body对象
-    QJsonObject jsonObjsendheader;//发送的header对象
-    QJsonObject jsonObjsendmessagedata;//发送的messagedata对象
-    QString jsonObjsendchecksum;//发送的checksum字符串
-    QTimer *yanshiTimer;
+    QString strkeyNo;
+    QString strpubKey;
+    QString strwalletAddr;
+    QString strlotteryTime;
+    QString winnerWallet;
     QString keccak_256(const QString &input);
     QString Erc55checksum(const QString &address);
-    QString ETHaddr;
-    QString ETHaddrchecksum;
-    int i;
-};
 
+    QJsonDocument jsonDocreceiveBTData;//收到的json格式文档
+    QJsonObject jsonObjreceiveBTData;//收到的json格式对象
+    QJsonObject jsonObjreceiveBTDatabody;//收到的body对象
+    QJsonObject jsonObjreceiveBTDataheader;//收到的header对象
+    QJsonObject jsonObjreceiveBTDatabodymessagedata;//收到的body里messagedata对象
+    QJsonDocument jsonDocsendBTData;//发送的json格式文档
+    QJsonObject jsonObjsendBTData;//发送的json格式对象
+    QJsonObject jsonObjsendBTDatabody;//发送的body对象
+    QJsonObject jsonObjsendBTDataheader;//发送的header对象
+    QJsonObject jsonObjsendBTDatabodymessagedata;//发送的messagedata对象
+
+    QByteArray m_bufferSend;
+    QByteArray m_bufferReceive;
+
+    bool isConnect;
+    bool hashfileExists;
+    bool getallrandom;
+
+    QJsonDocument jsonDocreceiveTCPData;//收到的json格式文档
+    QJsonObject jsonObjreceiveTCPData;//收到的json格式对象
+    QJsonObject jsonObjreceiveTCPDatabody;//收到的body对象
+    QJsonObject jsonObjreceiveTCPDataheader;//收到的header对象
+    QJsonDocument jsonDocsendTCPData;//发送的json格式文档
+    QJsonObject jsonObjsendTCPData;//发送的json格式对象
+    QJsonObject jsonObjsendTCPDatabody;//发送的body对象
+    QJsonObject jsonObjsendTCPDataheader;//发送的header对象
+    QJsonArray jsonArrsendTCPDatabodylist;//发送的list数组
+    QJsonObject lotteryItem;
+
+    QTimer *drbgTimer;
+    QTimer *endTimer;
+    QTimer *ConnectTimer;
+    QTimer *walletAddrTimer;
+    QTimer *randomTimer;
+    QTimer *sigTimer;
+    QTimer *checkTimer;
+    QTimer *packetTimer;
+    QTimer *waitForNextPacketTimer;
+
+    int randomcount = 1;
+    int packetCount;
+    int packetNumber = 0;
+    int calculateBodySize(const QJsonObject& bodyObject);//计算body字节
+    const static int walletAddrCount = 10;//钱包地址数量
+    const int packetSize = 8192 * 2; // 假设每个数据包随机数大小为8k字节
+};
+void outputLog(QtMsgType type, const QMessageLogContext &context, const QString &msg);//输出日志
+void signalHandler(int signal);
 #endif // QRSERVER_H

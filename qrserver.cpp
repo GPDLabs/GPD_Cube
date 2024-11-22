@@ -1,60 +1,58 @@
 #include "qrserver.h"
 #include <unistd.h>
 #include "sts.h"
+#include <QNetworkInterface>
+#include <iostream>
+#include <string>
 
 QRServer::QRServer(QObject *parent) : QObject(parent)
 {
     QBluetoothLocalDevice localDevice;
     QString localDeviceName;
 
-    // Check if Bluetooth is available on this device
     if (localDevice.isValid()) {
-        qDebug() << "Bluetooth is available !";
-
-        // Turn Bluetooth on
         localDevice.powerOn();
-
-        // Read local device name
         localDeviceName = localDevice.name();
-        qDebug() << "My name is :" << localDeviceName << "with address : " << localDevice.address().toString();
-
-        // Make it visible to others
+        qDebug() << "蓝牙名字:" << localDeviceName << "蓝牙MAC地址: " << localDevice.address().toString();
         localDevice.setHostMode(QBluetoothLocalDevice::HostDiscoverable);
-
-        // Get connected devices
         QList<QBluetoothAddress> remotes;
         remotes = localDevice.connectedDevices();
     }
+    global_port.setDataBits(QSerialPort::Data8);
+    global_port.setParity(QSerialPort::NoParity);
+    global_port.setStopBits(QSerialPort::OneStop);
+    global_port.setBaudRate(460800);//设置波特率460800
+    global_port.setPortName("ttyACM0");//LINUX设置端口号
+
+    StatusPath = currentPath+"/QR-randomStatus.csv";
+    initializeFileStatus(StatusPath);
 }
 
 void QRServer::startServer(const QBluetoothAddress &localAdapter) {
-    qDebug() << "Starting bluetooth server...";
+    qDebug() << "启动蓝牙服务器...";
     m_rfcommServer = new QBluetoothServer(QBluetoothServiceInfo::RfcommProtocol, this);
     connect(m_rfcommServer, SIGNAL(newConnection()), this, SLOT(clientConnected()));
     bool result = m_rfcommServer->listen(localAdapter);
     if (!result) {
-        qWarning() << "Cannot bind bluetooth server to" << localAdapter.toString();
+        qWarning() << "无法将蓝牙服务器绑定到" << localAdapter.toString();
         return;
     }
 
-    // Set server attributes
-    qDebug() << "Setting bluetooth server attributes...";
-    m_serviceInfo.setAttribute(QBluetoothServiceInfo::ServiceName, tr("Bt Rpi 3 Server"));
-    m_serviceInfo.setAttribute(QBluetoothServiceInfo::ServiceDescription,
-                               tr("Example bluetooth rpi3 server"));
-    m_serviceInfo.setAttribute(QBluetoothServiceInfo::ServiceProvider, tr("qt-project.org"));
+    //服务名称、描述和提供者
+    m_serviceInfo.setAttribute(QBluetoothServiceInfo::ServiceName, tr("QR Server"));
+    m_serviceInfo.setAttribute(QBluetoothServiceInfo::ServiceDescription,tr("bluetooth server"));
+    m_serviceInfo.setAttribute(QBluetoothServiceInfo::ServiceProvider, tr("Quakey"));
 
-    // Create unique bt uuid
+    //创建uuid
     m_serviceInfo.setServiceUuid(QBluetoothUuid(serviceUuid));
 
-    // Make it discoverable
-    qDebug() << "Make bluetooth server discoverable...";
+    //服务可发现
+    qDebug() << "让蓝牙服务器可被发现...";
     QBluetoothServiceInfo::Sequence publicBrowse;
     publicBrowse << QVariant::fromValue(QBluetoothUuid(QBluetoothUuid::PublicBrowseGroup));
-    m_serviceInfo.setAttribute(QBluetoothServiceInfo::BrowseGroupList,
-                               publicBrowse);
+    m_serviceInfo.setAttribute(QBluetoothServiceInfo::BrowseGroupList,publicBrowse);
 
-    // Used protocol
+    //协议描述符列表
     QBluetoothServiceInfo::Sequence protocolDescriptorList;
     QBluetoothServiceInfo::Sequence protocol;
     protocol << QVariant::fromValue(QBluetoothUuid(QBluetoothUuid::L2cap));
@@ -63,10 +61,24 @@ void QRServer::startServer(const QBluetoothAddress &localAdapter) {
     protocol << QVariant::fromValue(QBluetoothUuid(QBluetoothUuid::Rfcomm))
              << QVariant::fromValue(quint8(m_rfcommServer->serverPort()));
     protocolDescriptorList.append(QVariant::fromValue(protocol));
-    m_serviceInfo.setAttribute(QBluetoothServiceInfo::ProtocolDescriptorList,
-                               protocolDescriptorList);
+    m_serviceInfo.setAttribute(QBluetoothServiceInfo::ProtocolDescriptorList,protocolDescriptorList);
 
+    //注册服务
     m_serviceInfo.registerService(localAdapter);
+
+    QString wirelessInterfaceName = "wlan0";// 替换为你的无线接口名称
+    QNetworkInterface interface = QNetworkInterface::interfaceFromName(wirelessInterfaceName);// 获取特定的网络接口
+    if (!interface.isValid()) {
+        qDebug() << "接口:" << wirelessInterfaceName << "没有找到";
+    }// 检查接口是否存在
+    macAddress = interface.hardwareAddress();// 获取接口的硬件地址（MAC地址）
+    if (!macAddress.isEmpty()) {
+        qDebug() << "无线MAC地址:" << macAddress;
+    } else {
+        qDebug() << "未找到MAC地址:" << interface.name();
+    }// 检查MAC地址是否有效
+
+    getwalletAddr();
 }
 
 QRServer::~QRServer() {
@@ -74,35 +86,27 @@ QRServer::~QRServer() {
 }
 
 void QRServer::stopServer() {
-    // Unregister service
+    // 注销服务
     m_serviceInfo.unregisterService();
 
-    // Close sockets
+    // 关闭套接字
     qDeleteAll(m_clientSockets);
 
-    // Close server
+    // 关闭服务器
     delete m_rfcommServer;
     m_rfcommServer = nullptr;
 }
 
-void QRServer::sendMessage(const QString &message) {
-    qDebug() << "Bluetooth sending: " << message;
-    QByteArray text = message.toUtf8() + '\n';
-
-    foreach (QBluetoothSocket *socket, m_clientSockets)
-        socket->write(text);
-}
-
 void QRServer::clientConnected() {
-    qDebug() << "New connection detected !";
+    qDebug() << "检测到新连接!";
     QBluetoothSocket *socket = m_rfcommServer->nextPendingConnection();
     if (!socket)
         return;
 
-    connect(socket, &QBluetoothSocket::readyRead, this, &QRServer::readSocket);
+    connect(socket, &QBluetoothSocket::readyRead, this, &QRServer::readBTSocket);
     connect(socket, SIGNAL(disconnected()), this, SLOT(clientDisconnected()));
     m_clientSockets.append(socket);
-    qDebug() << "Client [" << socket->peerName() << "] connected !";
+    qDebug() << "客户端[" << socket->peerName() << "]已连接!";
     emit clientConnected(socket->peerName());
 }
 
@@ -118,300 +122,150 @@ void QRServer::clientDisconnected() {
     socket->deleteLater();
 }
 
-void QRServer::readSocket() {
+void QRServer::readBTSocket() {
     QBluetoothSocket *socket = qobject_cast<QBluetoothSocket *>(sender());
     if (!socket)
         return;
-    //接收到的字符串必须以"/n",二进制为0A结尾才能读到
-    //    while (socket->canReadLine()) {
-    //        QByteArray line = socket->readLine().trimmed();
-    //        emit messageReceived(socket->peerName(),
-    //                             QString::fromUtf8(line.constData(), line.length()));
-    //    }
+
     //都可以读取
-    QByteArray receiveData ;
-    receiveData.append(socket->readAll());
-    qDebug() <<  "Bluetooth receving: " <<receiveData;
+    QByteArray receiveBTData ;
+    receiveBTData.append(socket->readAll());
+    qDebug() <<  "蓝牙接收: " <<receiveBTData;
 
-    jsonDocreceive = QJsonDocument::fromJson(receiveData);//收到的字节转为json文档
-    jsonObjreceive = jsonDocreceive.object();//json文档转为json对象
-    if(jsonObjreceive["body"].isObject()&&jsonObjreceive["header"].isObject()){
-        jsonObjreceivebody =jsonObjreceive["body"].toObject();
-        jsonObjreceiveheader =jsonObjreceive["header"].toObject();
-        jsonObjsendchecksum = jsonObjreceiveheader["checksum"].toString();
-        jsonObjreceivemessagedata = jsonObjreceivebody["messageData"].toObject();
-        if(jsonObjreceivebody["messageType"].toString()=="wirelessConf")
+    jsonDocreceiveBTData = QJsonDocument::fromJson(receiveBTData);//收到的字节转为json文档
+    jsonObjreceiveBTData = jsonDocreceiveBTData.object();//json文档转为json对象
+
+    if(jsonObjreceiveBTData["header"].isObject() && jsonObjreceiveBTData["body"].isObject()){
+        jsonObjreceiveBTDataheader = jsonObjreceiveBTData["header"].toObject();//收到的header对象
+        jsonObjreceiveBTDatabody = jsonObjreceiveBTData["body"].toObject();//收到的body对象
+        jsonObjreceiveBTDatabodymessagedata = jsonObjreceiveBTDatabody["messageData"].toObject();//收到的body里messagedata对象
+
+        if(jsonObjreceiveBTDatabody["messageType"].toString() == "wirelessConf")
         {
-            Openwifi();
-            jsonObjsendmessagedata["status"]="success";
-            jsonObjsendbody["messageType"]="wirelessConfResult";
-            jsonObjsendbody["messageData"]=jsonObjsendmessagedata;
-            //计算body对象下的数据长度，但不包括子对象内的
-            int bodylength =0;
-            QJsonValue bodyvalue = jsonObjsendbody;
-            if(bodyvalue.isObject()){
-                QJsonObject bodyobj =bodyvalue.toObject();
-                for(const QString &key : bodyobj.keys()){
-                    QJsonValue value = bodyobj[key];
-                    if(value.isObject()){
-                        QJsonObject obj = value.toObject();
-                        bodylength += key.length() + obj.size() * 2;
-                    }else if (value.isArray()) {
-                        QJsonArray arr = value.toArray();
-                        bodylength += key.length() + arr.size() * 2;
-                    }else{
-                        bodylength += key.length() + value.toString().length();
-                    }
-                }
-            }
-            //计算responsedata对象下的数据长度
-            int datalength =0;
-            QJsonValue datavalue = jsonObjsendmessagedata;
-            if(datavalue.isObject()){
-                QJsonObject dataobj =datavalue.toObject();
-                for(const QString &key : dataobj.keys()){
-                    QJsonValue value = dataobj[key];
-                    if(value.isObject()){
-                        QJsonObject obj = value.toObject();
-                        datalength += key.length() + obj.size() * 2;
-                    }else if (value.isArray()) {
-                        QJsonArray arr = value.toArray();
-                        datalength += key.length() + arr.size() * 2;
-                    }else{
-                        datalength += key.length() + value.toString().length();
-                    }
-                }
-            }
-            jsonObjsendheader["checksum"]=jsonObjsendchecksum;
-            jsonObjsendheader["messageLength"]=bodylength + datalength - jsonObjsendmessagedata.size() * 2;//消息长度为body+data-data内的对象数*2
-            jsonObjsendheader["messageType"]="response";
-            jsonObjsendheader["version"]="1.0";
+            openwifi();
+            jsonObjsendBTDatabodymessagedata["status"] = "success";
+            jsonObjsendBTDatabody["messageType"] = "wirelessConf";
+            jsonObjsendBTDatabody["messageData"] = jsonObjsendBTDatabodymessagedata;
 
-            jsonObjsend["header"]=jsonObjsendheader;
-            jsonObjsend["body"]=jsonObjsendbody;
+            //计算body对象下的数据长度
+            int bodylength = calculateBodySize(jsonObjsendBTDatabody);
 
-            QJsonDocument jsonDocsend(jsonObjsend);
-            QByteArray sendData  = jsonDocsend.toJson();
+            jsonObjsendBTDataheader["checksum"] = 11001;
+            jsonObjsendBTDataheader["messageLength"] = bodylength;//消息长度
+            jsonObjsendBTDataheader["messageType"] = "response";
+            jsonObjsendBTDataheader["version"] = "1.0";
+
+            jsonObjsendBTData["header"] = jsonObjsendBTDataheader;
+            jsonObjsendBTData["body"] = jsonObjsendBTDatabody;
+
+            QJsonDocument jsonDocsend(jsonObjsendBTData);
+            QByteArray sendBTData  = jsonDocsend.toJson();
             foreach (QBluetoothSocket *socket, m_clientSockets)
-                socket->write(sendData);
+                socket->write(sendBTData);
 
-            qDebug() << "Bluetooth sending: " << sendData;
-            sendData.clear();
-            jsonObjsend.remove("header");
-            jsonObjsend.remove("body");
+            qDebug() << "蓝牙发送: " << sendBTData;
+            sendBTData.clear();
+
+            jsonObjsendBTData.remove("header");
+            jsonObjsendBTData.remove("body");
+            jsonObjsendBTDatabodymessagedata.remove("status");
+
             return;
-        }else if(jsonObjreceivebody["messageType"].toString()=="walletAddr")
+        }else if(jsonObjreceiveBTDatabody["messageType"].toString() == "walletAddr")
         {
-            OpenPort();
-            AddKey();
-            //延时100毫米保证文件写入完毕
-            QEventLoop loop;
-            QTimer::singleShot(100,&loop,SLOT(quit()));
-            loop.exec();
-            DecompressKey();
+            int intkeyNo = jsonObjreceiveBTDatabodymessagedata["keyNo"].toInt();
+            strkeyNo = QString::number(intkeyNo);
 
-            //延时100毫米保证文件写入完毕
-            QTimer::singleShot(100,&loop,SLOT(quit()));
-            loop.exec();
+            addKey();
 
-            DPpubkeyfile = currentPath+"/DPpubkey.txt";
-            QFile file(DPpubkeyfile);
-            file.open(QFile::ReadOnly);
-            arrDPKey=file.readAll();
-            qDebug()<<arrDPKey;
-            file.close();
+            jsonObjsendBTDatabodymessagedata["status"] = "success";
+            jsonObjsendBTDatabodymessagedata["walletAddr"] = strwalletAddr;
+            jsonObjsendBTDatabodymessagedata["pubKey"] = strpubKey;
 
-            strDPKey=arrDPKey.toHex();
-            ETHaddr = keccak_256(strDPKey).right(40);//以太坊哈希值的后20字节
-            ETHaddrchecksum = Erc55checksum(ETHaddr);
-            //            qDebug()<<strDPKey<<ETHaddr<<ETHaddr.size()<<ETHaddrchecksum;
+            jsonObjsendBTDatabody["messageType"] = "walletAddr";
+            jsonObjsendBTDatabody["messageData"] = jsonObjsendBTDatabodymessagedata;
 
-            jsonObjsendmessagedata["status"]="success";
-            jsonObjsendmessagedata["walletAddr"]=ETHaddrchecksum;
-            jsonObjsendmessagedata["pubKey"]=strDPKey;
+            //计算body对象下的数据长度
+            int bodylength = calculateBodySize(jsonObjsendBTDatabody);
 
-            jsonObjsendbody["messageType"]="walletAddrResult";
-            jsonObjsendbody["messageData"]=jsonObjsendmessagedata;
-            //计算body对象下的数据长度，但不包括子对象内的
-            int bodylength =0;
-            QJsonValue bodyvalue = jsonObjsendbody;
-            if(bodyvalue.isObject()){
-                QJsonObject bodyobj =bodyvalue.toObject();
-                for(const QString &key : bodyobj.keys()){
-                    QJsonValue value = bodyobj[key];
-                    if(value.isObject()){
-                        QJsonObject obj = value.toObject();
-                        bodylength += key.length() + obj.size() * 2;
-                    }else if (value.isArray()) {
-                        QJsonArray arr = value.toArray();
-                        bodylength += key.length() + arr.size() * 2;
-                    }else{
-                        bodylength += key.length() + value.toString().length();
-                    }
-                }
-            }
-            //计算messagedata对象下的数据长度
-            int datalength =0;
-            QJsonValue datavalue = jsonObjsendmessagedata;
-            if(datavalue.isObject()){
-                QJsonObject dataobj =datavalue.toObject();
-                for(const QString &key : dataobj.keys()){
-                    QJsonValue value = dataobj[key];
-                    if(value.isObject()){
-                        QJsonObject obj = value.toObject();
-                        datalength += key.length() + obj.size() * 2;
-                    }else if (value.isArray()) {
-                        QJsonArray arr = value.toArray();
-                        datalength += key.length() + arr.size() * 2;
-                    }else{
-                        datalength += key.length() + value.toString().length();
-                    }
-                }
-            }
-            jsonObjsendheader["checksum"]=jsonObjsendchecksum;
-            jsonObjsendheader["messageLength"]=bodylength + datalength - jsonObjsendmessagedata.size() * 2;//消息长度为body+data-data内的对象数*2
-            jsonObjsendheader["messageType"]="response";
-            jsonObjsendheader["version"]="1.0";
+            jsonObjsendBTDataheader["checksum"] = 11002;
+            jsonObjsendBTDataheader["messageLength"] = bodylength;//消息长度
+            jsonObjsendBTDataheader["messageType"] = "response";
+            jsonObjsendBTDataheader["version"] = "1.0";
 
-            jsonObjsend["header"]=jsonObjsendheader;
-            jsonObjsend["body"]=jsonObjsendbody;
-            QJsonDocument jsonDocsend(jsonObjsend);
-            QByteArray sendData  = jsonDocsend.toJson();
+            jsonObjsendBTData["header"] = jsonObjsendBTDataheader;
+            jsonObjsendBTData["body"] = jsonObjsendBTDatabody;
+
+            QJsonDocument jsonDocsend(jsonObjsendBTData);
+            QByteArray sendBTData  = jsonDocsend.toJson();
 
             foreach (QBluetoothSocket *socket, m_clientSockets)
-                socket->write(sendData);
-            qDebug() << "Bluetooth sending: " << sendData;
-            sendData.clear();
-            jsonObjsend.remove("header");
-            jsonObjsend.remove("body");
-            jsonObjsendmessagedata.remove("walletAddr");
-            jsonObjsendmessagedata.remove("pubKey");
-            global_port.close();
-            return;
+                socket->write(sendBTData);
 
-        }else if(jsonObjreceivebody["messageType"].toString()=="getRandom")
+            qDebug() << "蓝牙发送: " << sendBTData;
+            sendBTData.clear();
+
+            jsonObjsendBTData.remove("header");
+            jsonObjsendBTData.remove("body");
+            jsonObjsendBTDatabodymessagedata.remove("status");
+            jsonObjsendBTDatabodymessagedata.remove("walletAddr");
+            jsonObjsendBTDatabodymessagedata.remove("pubKey");
+
+            return;
+        }else if(jsonObjreceiveBTDatabody["messageType"].toString() == "vqrIPConf")
         {
-            OpenPort();
-            OutputRandom();
-            //            int loopCount = 1024; // 循环次数
-            //            yanshiTimer = new QTimer;
-            //            yanshiTimer->start(100);//触发时间，单位：毫秒
-            //            connect(yanshiTimer,&QTimer::timeout,[=](){
-            //                static int count = 0;
-            //                count++;
-            //                // 如果已经执行了足够次数的操作，停止定时器
-            //                if (count <= loopCount) {
-            //                    OutputRandom();
-            //                }else{
-            //                    yanshiTimer->stop();
-            //                    qDebug()<<"随机数输出完成";
-            //                    ReadRandomFile();
-            //                }
-            //            });
-            //延时100毫米保证文件写入完毕
-            QEventLoop loop;
-            QTimer::singleShot(100,&loop,SLOT(quit()));
-            loop.exec();
+            int intkeyNo = jsonObjreceiveBTDatabodymessagedata["keyNo"].toInt();
+            strkeyNo = QString::number(intkeyNo);
 
-            //            QProcess DRBG;
-            //            DRBG.setProgram(currentPath+"/libdrbg/drbg"); // 替换为你的可执行文件路径
-            //            // 执行程序
-            //            DRBG.start();
-            //            // 等待程序执行完成
-            //            DRBG.waitForFinished();
-            //            // 获取输出和错误
-            //            QString output = DRBG.readAllStandardOutput();
-            //            QString error = DRBG.readAllStandardError();
-            //            // 输出程序的输出和错误
-            //            qDebug() << "Output:" << output;
-            //            qDebug() << "Error:" << error;
+            vqrServerIP = jsonObjreceiveBTDatabodymessagedata["ipAddr"].toString();
+            vqrServerIPfile = currentPath+"/QR-vqrServerIP.txt" ;
+            QFile ipfile(vqrServerIPfile);
+            ipfile.open(QFile::WriteOnly);
+            ipfile.resize(0);
+            ipfile.write(vqrServerIP.toLocal8Bit().data());
+            ipfile.close();
 
-            //            randomfile = currentPath+"/drbgaesrandom.txt";//linux路径
-            randomfile = currentPath+"/random.txt";//linux路径
-            QFile file(randomfile);
-            file.open(QFile::ReadOnly);
-            arrRandom = file.readAll();
-            RandomSize = arrRandom.size();
-            strRandom = arrRandom.toHex();
-            file.close();
+            startTcp();
 
-            jsonObjsendmessagedata["status"]="success";
-            jsonObjsendmessagedata["randomCounat"]=RandomSize/1024;
-            jsonObjsendmessagedata["random"]=strRandom;
+            jsonObjsendBTDatabody["messageType"] = "vqrIPConf";
+            jsonObjsendBTDatabody["messageData"] = jsonObjsendBTDatabodymessagedata;
 
-            jsonObjsendbody["messageType"]="getRandomResult";
-            jsonObjsendbody["messageData"]=jsonObjsendmessagedata;
+            //计算body对象下的数据长度
+            int bodylength = calculateBodySize(jsonObjsendBTDatabody);
 
-            //计算body对象下的数据长度，但不包括子对象内的
-            int bodylength =0;
-            QJsonValue bodyvalue = jsonObjsendbody;
-            if(bodyvalue.isObject()){
-                QJsonObject bodyobj =bodyvalue.toObject();
-                for(const QString &key : bodyobj.keys()){
-                    QJsonValue value = bodyobj[key];
-                    if(value.isObject()){
-                        QJsonObject obj = value.toObject();
-                        bodylength += key.length() + obj.size() * 2;
-                    }else if (value.isArray()) {
-                        QJsonArray arr = value.toArray();
-                        bodylength += key.length() + arr.size() * 2;
-                    }else{
-                        bodylength += key.length() + value.toString().length();
-                    }
-                }
-            }
-            //计算messagedata对象下的数据长度
-            int datalength =0;
-            QJsonValue datavalue = jsonObjsendmessagedata;
-            if(datavalue.isObject()){
-                QJsonObject dataobj =datavalue.toObject();
-                for(const QString &key : dataobj.keys()){
-                    QJsonValue value = dataobj[key];
-                    if(value.isObject()){
-                        QJsonObject obj = value.toObject();
-                        datalength += key.length() + obj.size() * 2;
-                    }else if (value.isArray()) {
-                        QJsonArray arr = value.toArray();
-                        datalength += key.length() + arr.size() * 2;
-                    }else{
-                        datalength += key.length() + value.toString().length();
-                    }
-                }
-            }
-            jsonObjsendheader["checksum"]=jsonObjsendchecksum;
-            jsonObjsendheader["messageLength"]=bodylength + datalength - jsonObjsendmessagedata.size() * 2;//消息长度为body+data-data内的对象数*2
-            jsonObjsendheader["messageType"]="response";
-            jsonObjsendheader["version"]="1.0";
+            jsonObjsendBTDataheader["checksum"] = 11003;
+            jsonObjsendBTDataheader["messageLength"] = bodylength;//消息长度
+            jsonObjsendBTDataheader["messageType"] = "response";
+            jsonObjsendBTDataheader["version"] = "1.0";
 
-            jsonObjsend["header"]=jsonObjsendheader;
-            jsonObjsend["body"]=jsonObjsendbody;
-            QJsonDocument jsonDocsend(jsonObjsend);
-            QByteArray sendData  = jsonDocsend.toJson();
+            jsonObjsendBTData["header"] = jsonObjsendBTDataheader;
+            jsonObjsendBTData["body"] = jsonObjsendBTDatabody;
+
+            QJsonDocument jsonDocsend(jsonObjsendBTData);
+            QByteArray sendBTData  = jsonDocsend.toJson();
             foreach (QBluetoothSocket *socket, m_clientSockets)
-                socket->write(sendData);
-            qDebug() << "Bluetooth sending: " << sendData;
-            sendData.clear();
-            jsonObjsend.remove("header");
-            jsonObjsend.remove("body");
-            jsonObjsendmessagedata.remove("random");
-            jsonObjsendmessagedata.remove("randomCounat");
-            global_port.close();
-            return;
-        }
-        else{
+                socket->write(sendBTData);
+
+            qDebug() << "蓝牙发送: " << sendBTData;
+            sendBTData.clear();
+
+            jsonObjsendBTData.remove("header");
+            jsonObjsendBTData.remove("body");
+            jsonObjsendBTDatabodymessagedata.remove("status");
+
             return;
         }
     }
 }
 
-void QRServer::Openwifi() {
-    QString jsonwifiName = jsonObjreceivemessagedata["wifiName"].toString();
-    QString jsonwifiPwd = jsonObjreceivemessagedata["wifiPwd"].toString();
+void QRServer::openwifi() {
+    QString jsonwifiName = jsonObjreceiveBTDatabodymessagedata["wifiName"].toString();
+    QString jsonwifiPwd = jsonObjreceiveBTDatabodymessagedata["wifiPwd"].toString();
 
-    QFile file("/etc/wpa_supplicant/wpa_supplicant.conf");
-    if(file.open(QIODevice::WriteOnly | QIODevice::Text))
+    QFile wififile("/etc/wpa_supplicant/wpa_supplicant.conf");
+    if(wififile.open(QIODevice::WriteOnly | QIODevice::Text))
     {
-        QTextStream stream(&file);
+        QTextStream stream(&wififile);
 
         stream<<"ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev\n";
         stream<<"update_config=1\n";
@@ -425,158 +279,1107 @@ void QRServer::Openwifi() {
         stream<<"\tkey_mgmt=WPA-PSK\n";
         stream<<"}";
 
-        file.close();
+        wififile.close();
         QProcess process1;
         process1.start("sh",QStringList()<<"-c"<<"sudo wpa_cli -i wlan0 reconfigure");
         process1.waitForFinished();
     }
 }
-void QRServer::OpenPort()
+
+void QRServer::getwalletAddr()
 {
-    global_port.setDataBits(QSerialPort::Data8);
-    global_port.setParity(QSerialPort::NoParity);
-    global_port.setStopBits(QSerialPort::OneStop);
-    global_port.setBaudRate(460800);//设置波特率460800
-    global_port.setPortName("ttyACM0");//LINUX设置端口号
-    if(global_port.open(QIODevice::ReadWrite))
-    {
-        qDebug()<<"串口打开成功";
-        return;
-    }else
-    {
-        qDebug()<<"串口打开失败";
+    int walletcount = 1;
+    walletAddrTimer = new QTimer;
+    walletAddrTimer->setSingleShot(false);//设置为非单次触发
+    walletAddrTimer->setInterval(100);//触发时间，单位：毫秒
+    walletAddrTimer->start();//触发时间，单位：毫秒
+
+    connect(walletAddrTimer,&QTimer::timeout,[=]()mutable{
+        // 如果已经执行了足够次数的操作，停止定时器
+        if (walletcount > walletAddrCount) {
+            walletAddrTimer->stop();
+            qDebug() << "钱包地址已生成完毕";
+
+            getwalletAddrSig();
+        }else{
+            strkeyNo = QString::number(walletcount);
+
+            addKey();
+            //            qDebug() << "钱包地址生成"<<walletcount;
+            walletcount++;
+        }
+    });
+}
+
+void QRServer::addKey()
+{
+    if (!global_port.open(QIODevice::ReadWrite)){
+        qDebug() << "无法打开串口，错误：" << global_port.errorString();
+        digitalWrite(0, HIGH);
+        digitalWrite(2, LOW);
+        digitalWrite(3, LOW);
         return;
     }
-}
-void QRServer::AddKey()
-{
-    int intkeyNo = jsonObjreceivemessagedata["keyNo"].toInt();
-    QString strkeyNo = QString::number(intkeyNo);
-    QByteArray arrkeyNo=strkeyNo.toUtf8();
+
     //发送生成公钥指令
     QByteArray send_NK;
-    send_NK.resize(2);
-    send_NK[0]= 0x4E;//N
-    send_NK[1]= 0x4B;//K
-    global_port.write(send_NK + arrkeyNo);
+    send_NK.resize(3);
+    send_NK[0] = 0x4E;//N
+    send_NK[1] = 0x4B;//K
+    send_NK[2] = strkeyNo.toInt();
+    global_port.write(send_NK);
 
     //接收公钥写入文件
     connect(&global_port,&QSerialPort::readyRead,this,[=](){
-        arrKey.clear();
-        arrKey.append(global_port.readAll());
-        //        qDebug()<<arrKey;
-        strKey=arrKey.toHex();
-        //        qDebug()<<strKey;
-        pubkeyfile = currentPath+"/pubkey.txt" ;
-        QFile file(pubkeyfile);
-        file.open(QFile::ReadWrite|QFile::Truncate);
-        file.resize(0);
-        file.write(arrKey);
-        file.close();
-        disconnect(&global_port,0,0,0);
+        QByteArray arrpubKey = global_port.readAll();
+        strpubKey=arrpubKey.toHex();
+
+        QString pubkeypath = currentPath+"/QR-pubKey" + strkeyNo + ".txt" ;
+        QFile pubkeyfile(pubkeypath);
+        pubkeyfile.open(QFile::ReadWrite|QFile::Truncate);
+        pubkeyfile.resize(0);
+        pubkeyfile.write(arrpubKey);
+        pubkeyfile.close();
+        disconnect(&global_port,&QSerialPort::readyRead,this,nullptr);
+
+        decompressKeytowalletAddr();
     });
 }
-void QRServer::DecompressKey()
-{
-    pubkeyfile = currentPath+"/pubkey.txt";
-    QFile file(pubkeyfile);
-    file.open(QFile::ReadOnly);
-    arrKey=file.readAll();
 
-    file.close();
+void QRServer::decompressKeytowalletAddr()
+{
+    QString pubkeypath = currentPath + "/QR-pubKey" + strkeyNo + ".txt";
+    QFile pubkeyfile(pubkeypath);
+    pubkeyfile.open(QFile::ReadOnly);
+    QByteArray arrpubKey = pubkeyfile.readAll();
+    pubkeyfile.close();
+
     //发送生成公钥指令
     QByteArray send_DP;
     send_DP.resize(2);
-    send_DP[0]= 0x44;//D
-    send_DP[1]= 0x50;//P
-    global_port.write(send_DP + arrKey);
+    send_DP[0] = 0x44;//D
+    send_DP[1] = 0x50;//P
+    global_port.write(send_DP + arrpubKey);
+
     //接收公钥写入文件
     connect(&global_port,&QSerialPort::readyRead,this,[=](){
-        arrDPKey.clear();
-        arrDPKey.append(global_port.readAll());
-        strDPKey=arrDPKey.toHex();
+        QByteArray arrDPpubKey = global_port.readAll();
 
-        DPpubkeyfile = currentPath+"/DPpubkey.txt";
-        QFile file(DPpubkeyfile);
-        file.open(QFile::ReadWrite|QFile::Truncate);
-        file.resize(0);
-        file.write(arrDPKey);
-        file.close();
-        disconnect(&global_port,0,0,0);
+        QString dppubkeypath = currentPath + "/QR-dppubKey" + strkeyNo + ".txt";
+        QFile dppubkeyfile(dppubkeypath);
+        dppubkeyfile.open(QFile::ReadWrite|QFile::Truncate);
+        dppubkeyfile.resize(0);
+        dppubkeyfile.write(arrDPpubKey);
+        dppubkeyfile.close();
+
+        QString strDPpubKey = arrDPpubKey.toHex();
+        QString ETHaddr = keccak_256(strDPpubKey).right(40);//以太坊哈希值的后20字节
+        strwalletAddr = Erc55checksum(ETHaddr);
+
+        walletAddrPath = currentPath+"/QR-walletAddr" + strkeyNo + ".txt";
+        QFile walletAddrfile(walletAddrPath);
+        walletAddrfile.resize(0);
+        walletAddrfile.open(QFile::WriteOnly);
+        QTextStream out(&walletAddrfile);
+        out << strwalletAddr; //写入钱包地址
+        out.flush(); // 确保钱包地址被写入文件
+        walletAddrfile.close();
+
+        disconnect(&global_port,&QSerialPort::readyRead,this,nullptr);
+        global_port.close();
     });
 }
 
-void QRServer::OutputRandom()
+void QRServer::startTcp()
 {
-    QByteArray OR;
-    OR.resize(2);
-    OR[0]= 0x4F;//O
-    OR[1]= 0x52;//R
-    global_port.write(OR);
-    connect(&global_port,&QSerialPort::readyRead,this,[=](){
-        Random.clear();
-        Random.append(global_port.readAll());
-        randomfile = currentPath+"/random.txt";
-        QFile file(randomfile);
-        file.open(QFile::ReadWrite|QFile::Append);
-        //        if(file.size()==1048576){
-        file.resize(0);
-        file.write(Random);
-        //            file.flush();
-        file.close();
-        //        }
-        //        else{
-        //            file.write(Random);
-        //            file.flush();
-        //            file.close();
-        //        }
-        disconnect(&global_port,0,0,0);
-    });
+    m_TcpSocket = new QTcpSocket(this);
+    connect(m_TcpSocket, SIGNAL(error(QAbstractSocket::SocketError)),
+            this, SLOT(handleTcpSocketError(QAbstractSocket::SocketError)));
+    connect(m_TcpSocket, SIGNAL(readyRead()), this, SLOT(handleTcpSocketReadyRead()));
+    connect(m_TcpSocket,SIGNAL(disconnected()),this,SLOT(handleTcpSocketDisconnect()));
+
+    vqrServerPort = 8080;
+    isConnect = false;
+
+    ConnectTimer=new QTimer(this);
+    ConnectTimer->setInterval(5000);
+    connect(ConnectTimer,SIGNAL(timeout()),this,SLOT(vqrserverTimeout()));
+
+    tcpConnected();
 }
-void QRServer::ReadRandomFile()
+
+void QRServer::tcpConnected()
 {
-    randomfile = currentPath+"/random.txt";//linux路径
-    QFileInfo fileinfo(randomfile);
-    if (randomfile.isEmpty() || fileinfo.size()== 0)
-    {
+    if(isConnect){
+        m_TcpSocket->close();
+        isConnect = false;
+        qDebug()<<"断开连接";
         return;
     }
-    QFile file(randomfile);
-    file.open(QFile::ReadWrite);
-    arrRandom= file.readAll();
-    RandomSize = arrRandom.size();
-    strRandom=arrRandom.toHex();
-    file.close();
-    unsigned char *rnd_data = reinterpret_cast<unsigned char *>(arrRandom.data());
-    i = nist_randomness_evaluate(rnd_data);
-    qDebug()<<i;
-    if (i) {
-        //            printf("\nSorry, Some Randomness Test Failed.\n");
-        qDebug()<<("\nSorry, Some Randomness Test Failed.\n");
+
+    if (randomTimer) {
+        randomTimer->stop();
+    }
+
+    if (drbgTimer) {
+        drbgTimer->stop();
+    }
+
+    m_TcpSocket->connectToHost(QHostAddress(vqrServerIP),vqrServerPort);
+
+    if (m_TcpSocket->waitForConnected(1000))
+    {
+        qDebug()<<QString("连接成功 %1 %2").arg(m_TcpSocket->peerAddress().toString()).arg(m_TcpSocket->peerPort());
+        isConnect = true;
+        ConnectTimer->stop();
+        jsonObjsendBTDatabody["status"] = "success";
+
+        digitalWrite(0, LOW);
+        digitalWrite(2, LOW);
+        digitalWrite(3, HIGH);
+
+        loginVqr();
+
+        if (randomTimer) {
+            randomTimer->start();
+        }
+        else{
+            getRandom();
+        }
+
     }
     else {
-        //            printf("\nCongratulations, All Randomness Test Passed.\n");
-        qDebug()<<("\nCongratulations, All Randomness Test Passed.\n");
+        qDebug()<<QString("连接失败 %1").arg(m_TcpSocket->errorString());
+        jsonObjsendBTDatabody["status"] = "fail";
+        ConnectTimer->start();
+
+        digitalWrite(0, HIGH);
+        digitalWrite(2, LOW);
+        digitalWrite(3, LOW);
     }
 }
-QString QRServer::keccak_256(const QString &input) {
+
+void QRServer::handleTcpSocketError(QAbstractSocket::SocketError)
+{
+    qDebug()<<QString("Socket错误 %1").arg(m_TcpSocket->errorString());
+    ConnectTimer->start();
+    digitalWrite(0, HIGH);
+    digitalWrite(2, LOW);
+    digitalWrite(3, LOW);
+}
+
+void QRServer::handleTcpSocketDisconnect()
+{
+    qDebug()<<QString("Socket 断开 %1").arg(m_TcpSocket->state());
+    if(isConnect){
+        isConnect = false;
+        ConnectTimer->start();
+        if (randomTimer) {
+            randomTimer->stop();
+        }
+        if (drbgTimer) {
+            drbgTimer->stop();
+        }
+        digitalWrite(0, HIGH);
+        digitalWrite(2, LOW);
+        digitalWrite(3, LOW);
+    }
+}
+
+void QRServer::vqrserverTimeout()
+{
+    qDebug()<<"服务器超时,将重新尝试连接...";
+    tcpConnected();
+}
+
+void QRServer::ipfileExists()
+{
+    vqrServerIPfile = currentPath + "/QR-vqrServerIP.txt";
+    QFile vqripfile(vqrServerIPfile);
+    if(vqripfile.exists()){
+        if(!vqripfile.open(QIODevice::ReadOnly)){
+            return;
+        }
+        QTextStream vqrip(&vqripfile);
+        vqrServerIP = vqrip.readAll();
+        vqripfile.close();
+
+        startTcp();
+    }
+}
+
+void QRServer::handleTcpSocketReadyRead()
+{
+    QByteArray receiveTCPData = m_TcpSocket->readAll();
+    qDebug()<<  "TCP接收: " <<receiveTCPData;
+
+    processReceivedData(receiveTCPData);
+}
+
+void QRServer::processReceivedData(const QByteArray &data) {
+    jsonDocreceiveTCPData = QJsonDocument::fromJson(data);//收到的字节转为json文档
+    jsonObjreceiveTCPData = jsonDocreceiveTCPData.object();//json文档转为json对象
+
+    if(jsonObjreceiveTCPData["header"].isObject()&&jsonObjreceiveTCPData["body"].isObject())
+    {
+        jsonObjreceiveTCPDataheader = jsonObjreceiveTCPData["header"].toObject();
+        jsonObjreceiveTCPDatabody = jsonObjreceiveTCPData["body"].toObject();
+
+        if(jsonObjreceiveTCPDataheader["messageName"].toString()=="lotteryResult")
+        {
+            winnerWallet = jsonObjreceiveTCPDatabody["winnerWallet"].toString();
+            int totalPackets = jsonObjreceiveTCPDatabody["totalPackets"].toInt();
+            int currentPacket = jsonObjreceiveTCPDatabody["currentPacket"].toInt();
+
+            // 如果已经有定时器在运行，先停止它
+            if(waitForNextPacketTimer && waitForNextPacketTimer->isActive())
+            {
+                waitForNextPacketTimer->stop();
+            }
+            // 如果定时器还没有创建，创建一个新的定时器
+            if(!waitForNextPacketTimer)
+            {
+                waitForNextPacketTimer = new QTimer;
+                connect(waitForNextPacketTimer, &QTimer::timeout, this, [=]()mutable{
+                    qDebug()<<"超过2秒没有请求下一个包，判断超时，取消随机数发送";
+                    packetNumber = 0;
+                    delete packetTimer;
+                    packetTimer = nullptr;
+                });
+            }
+            // 设置定时器2秒后触发
+            waitForNextPacketTimer->setSingleShot(true);
+            waitForNextPacketTimer->start(2000); // 2000毫秒后触发
+
+            if(packetTimer)
+            {
+                if(currentPacket < packetCount)
+                {
+                    if (currentPacket == packetNumber)
+                    {
+                        packetTimer->start();
+                    }else
+                    {
+                        packetNumber = currentPacket;
+                        packetTimer->start();
+                    }
+                }else
+                {
+                    qDebug()<<"所有随机数包发送完成，准备删除文件";
+                    packetNumber = 0;
+                    delete packetTimer;
+                    packetTimer = nullptr;
+                    // 如果是最后一个包，不需要等待，直接取消定时器
+                    if(waitForNextPacketTimer)
+                    {
+                        waitForNextPacketTimer->stop();
+                    }
+                    //发送完删除随机数和签名文件
+                    for (int fileNumber = 1; fileNumber <= walletAddrCount; ++fileNumber) {
+                        QString strkeyNo = QString::number(fileNumber);
+                        QString signedhashpath = currentPath + "/QR-drbgaesrandomhash" + strkeyNo + ".txt.sig";
+                        QFile::remove(signedhashpath);
+                        QString signedrandompath = currentPath + "/QR-drbgaesrandom" + strkeyNo + ".txt.sig";
+                        QFile::remove(signedrandompath);
+                    }
+                    QString keydrbgrandomhashsigpath = currentPath + "/QR-drbgaesrandomhashsig.txt";
+                    QFile::remove(keydrbgrandomhashsigpath);
+                }
+            }else
+            {
+                lotteryResult();
+            }
+            return;
+        }else if(jsonObjreceiveTCPDataheader["messageName"].toString()=="luckyWallet")
+        {
+            if (randomTimer) {
+                randomTimer->stop();
+            }
+            if (drbgTimer) {
+                drbgTimer->stop();
+            }
+            if (endTimer) {
+                endTimer->stop();
+            }
+            qDebug()<<"停止生成随机数和摇号定时器";
+            QString luckylotteryTime = jsonObjreceiveTCPDatabody["lotteryTime"].toString();
+            QString luckyqrId = jsonObjreceiveTCPDatabody["qrId"].toString();
+            QString luckywalletAddr = jsonObjreceiveTCPDatabody["walletAddr"].toString();
+            QString luckywalletPubKey = jsonObjreceiveTCPDatabody["walletPubKey"].toString();
+            strlotteryTime = jsonObjreceiveTCPDatabody["nextLotteryStart"].toString();
+
+            QDateTime endTime = QDateTime::fromString(strlotteryTime, "yyyyMMdd HH:mm:ss");
+            QDateTime currentTime = QDateTime::currentDateTime();
+            int secondDifference = currentTime.secsTo(endTime);//秒差
+
+            endTimer->setInterval(secondDifference * 1000 - 20000);//将endTime转换为毫秒
+            endTimer->start();
+            qDebug()<<"距离摇号开始："<<secondDifference<<"秒，启动定时器，参与摇号";
+
+            randomTimer->start();
+            qDebug()<<"开始补充随机数";
+
+            return;
+        }else if(jsonObjreceiveTCPDataheader["messageName"].toString()=="loginVqr")
+        {
+            registerWallet();
+            return;
+        }else if(jsonObjreceiveTCPDataheader["messageName"].toString()=="registerWallet")
+        {
+            getLotteryTime();
+            return;
+        }else if(jsonObjreceiveTCPDataheader["messageName"].toString()=="getLotteryTime")
+        {
+            QString strlotteryPhase = jsonObjreceiveTCPDatabody["lotteryPhase"].toString();
+            strlotteryTime = jsonObjreceiveTCPDatabody["lotteryTime"].toString();
+            QDateTime endTime = QDateTime::fromString(strlotteryTime, "yyyyMMdd HH:mm:ss");
+            QDateTime currentTime = QDateTime::currentDateTime();
+            if(strlotteryPhase == "COLLECTING"){
+                int secondDifference = currentTime.secsTo(endTime);//秒差
+                if (getallrandom == true) {
+                    hashSig();
+                }else{
+                    if(!endTimer){
+                        endTimer = new QTimer;
+                        endTimer->setSingleShot(true);//设置为单次触发
+                        connect(endTimer, &QTimer::timeout, this, &QRServer::onEndTimeReached);
+                    }else{
+                        endTimer->stop();
+                    }
+                    if(secondDifference >= 20){
+                        endTimer->setInterval(secondDifference * 1000 - 20000);//将endTime转换为毫秒
+                        endTimer->start();
+                        qDebug()<<"距离摇号开始："<<secondDifference<<"秒，启动定时器，参与摇号";
+                    }
+                    else{
+                        endTimer->start(0);
+                        qDebug()<<"距离摇号开始不到："<<secondDifference<<"秒，不参与摇号";
+                    }
+                }
+            }
+            return;
+        }
+    }
+}
+
+void QRServer::getRandom()
+{
+    randomTimer = new QTimer;
+    randomTimer->setInterval(10);//触发时间，单位：毫秒
+    randomTimer->start();
+
+    connect(randomTimer,&QTimer::timeout,[=]()mutable{
+        QVector<int> processedNumbers = readProcessedFileNumbers(StatusPath);
+        auto intNo = processedNumbers.begin();
+        // 检查迭代器是否到达了processedNumbers的末尾
+        if (intNo != processedNumbers.end()) {
+            getallrandom = false;
+            randomTimer->stop();
+            QString strkeyNo = QString::number(*intNo); // 使用当前编号
+            n_drbgrandomPath = currentPath + "/QR-drbgaesrandom" + strkeyNo + ".txt";
+            n_drbgrandomhashPath = currentPath + "/QR-drbgaesrandomhash" + strkeyNo + ".txt";
+
+            getDrbgRandom();
+
+            randomcount = *intNo;
+            qDebug() << "随机数补充"<<randomcount;
+            ++intNo;
+        }else
+        {
+            getallrandom = true;
+            qDebug() << "本次随机数补充完成";
+            randomTimer->stop();
+            if (endTimer && endTimer->isActive()) {
+                endTimer->stop();
+                hashSig();
+            }
+        }
+    });
+}
+
+void QRServer::getDrbgRandom()
+{
+    QString drbgrandompath = currentPath + "/QR-drbgaesrandom.txt";//drbgaesrandom路径
+    QFile drbgfile(drbgrandompath);
+    if(drbgfile.exists())
+    {
+        drbgfile.resize(0);
+    }
+
+    int loopCount = 1024; // 循环次数
+    int count = 0;
+    drbgTimer = new QTimer;
+    drbgTimer->start(0);//触发时间，单位：毫秒
+
+    connect(drbgTimer,&QTimer::timeout,[=]()mutable{
+        // 如果已经执行了足够次数的操作，停止定时器
+        if (count >= loopCount) {
+            drbgTimer->stop();
+            delete drbgTimer;
+            drbgTimer = nullptr;
+
+            qDebug()<<"随机数输出完成"<<count;
+
+            QFile drbgfile(drbgrandompath);
+            QFile keydrbgfile(n_drbgrandomPath);
+            // 检查目标文件是否存在
+            if (keydrbgfile.exists()) {
+                if (keydrbgfile.remove()) {
+                    if (!drbgfile.rename(n_drbgrandomPath)) {
+                        qDebug() << "重命名失败";
+                        return;
+                    }
+                } else {
+                    qDebug() << "无法删除已存在的文件";
+                    return;
+                }
+            } else {
+                if (!drbgfile.rename(n_drbgrandomPath)) {
+                    qDebug() << "重命名失败";
+                    return;
+                }
+            }
+
+            qDebug()<<"等待随机数测试";
+            testRandomFile();
+        }else{
+            QProcess DRBG;
+            DRBG.setProgram(currentPath+"/libdrbg/drbg"); // 替换为你的可执行文件路径
+
+            // 执行程序
+            DRBG.start();
+            DRBG.waitForFinished();
+            QString output = DRBG.readAllStandardOutput();
+            count++;
+        }
+    });
+}
+
+void QRServer::testRandomFile()
+{
+    QFile drbgfile(n_drbgrandomPath);
+    drbgfile.open(QFile::ReadWrite);
+    QByteArray arrdrbgRandom = drbgfile.readAll();
+    drbgfile.close();
+    unsigned char *rnd_data = reinterpret_cast<unsigned char *>(arrdrbgRandom.data());
+    int i = nist_randomness_evaluate(rnd_data);
+    if (i) {
+        if (drbgfile.exists()) {
+            if (drbgfile.remove()) {
+                qDebug()<<"已删除失败的随机数文件";
+            } else {
+                qDebug()<<"删除随机数文件失败";
+            }
+        }
+        qDebug()<<"随机数测试失败,等待重新生成随机数"<<randomcount;
+        getDrbgRandom();
+    }
+    else {
+        qDebug()<<"随机数测试通过";
+        QByteArray randomHash = QCryptographicHash::hash(arrdrbgRandom, QCryptographicHash::Sha256);
+        saveHashToFile(randomHash.toHex(),n_drbgrandomhashPath);
+        updateFileStatus(StatusPath, randomcount, 1);//随机数哈希状态更新为1，表示已存在
+
+        if (randomTimer) {
+            randomTimer->start();
+        }
+    }
+}
+
+void QRServer::hashSig()
+{
+    if (!global_port.open(QIODevice::ReadWrite)){
+        qDebug() << "无法打开串口，错误：" << global_port.errorString();
+        digitalWrite(0, HIGH);
+        digitalWrite(2, LOW);
+        digitalWrite(3, LOW);
+        return;
+    }
+    QByteArray allHashes;
+    hashfileExists = false;
+
+    for (int fileNumber = 1; fileNumber <= walletAddrCount; ++fileNumber) {
+        QString strkeyNo = QString::number(fileNumber);
+        QString drbgaesrandomhashpath = currentPath + "/QR-drbgaesrandomhash" + strkeyNo + ".txt"; // drbghash路径
+        QString sighashpath = drbgaesrandomhashpath + ".sig";
+
+        QFile randomhashfile(drbgaesrandomhashpath);
+        QFile sighashfile(sighashpath);
+        if (randomhashfile.exists()){  // 如果randomhash文件存在
+            hashfileExists = true;// 至少有一个存在，设置为true
+            if (sighashfile.exists()) {
+                if (sighashfile.remove()) {
+                    if (!randomhashfile.rename(sighashpath)) {
+                        qDebug() << "重命名失败";
+                        return;
+                    }
+                } else {
+                    qDebug() << "无法删除已存在的文件";
+                    return;
+                }
+            } else {
+                if (!randomhashfile.rename(sighashpath)) {
+                    qDebug() << "重命名失败";
+                    return;
+                }
+            }
+        } else {
+            if (sighashfile.exists()) {
+                if (sighashfile.remove()) {
+                    qDebug() << "已删除存在的文件";
+                } else {
+                    qDebug() << "无法删除已存在的文件";
+                }
+            }
+        }
+
+        if (!sighashfile.open(QIODevice::ReadOnly)) {
+            continue;
+        }
+
+        allHashes.append(sighashfile.readAll());
+        sighashfile.close();
+
+        updateFileStatus(StatusPath, fileNumber, 2);//随机数哈希状态更新为2，表示已使用签名
+
+        QString keydrbgrandompath = currentPath + "/QR-drbgaesrandom" + strkeyNo + ".txt";
+        QFile randomfile(keydrbgrandompath);
+        QString sigrandompath = keydrbgrandompath + ".sig";
+        QFile sigrandomfile(sigrandompath);
+        if (sigrandomfile.exists()) {
+            if (sigrandomfile.remove()) {
+                if (!randomfile.rename(sigrandompath)) {
+                    qDebug() << "重命名失败";
+                    return;
+                }
+            } else {
+                qDebug() << "无法删除已存在的文件";
+                return;
+            }
+        } else {
+            if (!randomfile.rename(sigrandompath)) {
+                qDebug() << "重命名失败";
+                return;
+            }
+        }
+    }
+    QByteArray finalHash = QCryptographicHash::hash(allHashes, QCryptographicHash::Sha256);
+
+    QByteArray send_SH;
+    send_SH.resize(3);
+    send_SH[0]= 0x53;//S
+    send_SH[1]= 0x48;//H
+    send_SH[2]= 1;
+    global_port.write(send_SH + finalHash);
+
+    connect(&global_port,&QSerialPort::readyRead,this,[=](){
+        QString keydrbgrandomhashsigpath = currentPath + "/QR-drbgaesrandomhashsig.txt";//drbghash签名文件路径
+        QByteArray arrdrbgRandomhashSig = global_port.readAll();
+        QFile hashsigfile(keydrbgrandomhashsigpath);
+        hashsigfile.open(QFile::WriteOnly);
+        hashsigfile.write(arrdrbgRandomhashSig);
+        hashsigfile.close();
+
+        disconnect(&global_port,&QSerialPort::readyRead,this,nullptr);
+        global_port.close();
+        lotteryStart();
+    });
+}
+void QRServer::lotteryStart(){
+    jsonObjsendTCPDatabody["lotteryStart"] = strlotteryTime;
+    jsonObjsendTCPDatabody["qrId"] = macAddress;
+
+    if(hashfileExists == true){
+        //是否参加（yes/no）
+        jsonObjsendTCPDatabody["isJoin"] = "yes";
+
+        //drgb随机数哈希签名
+        QString keydrbgrandomhashsigpath = currentPath + "/QR-drbgaesrandomhashsig.txt";
+        QFile drbgrandomhashsigfile(keydrbgrandomhashsigpath);
+        drbgrandomhashsigfile.open(QFile::ReadOnly);
+        QByteArray arrdrbgrandomhashsig = drbgrandomhashsigfile.readAll();
+        QString strdrbgrandomhashsig = arrdrbgrandomhashsig.toHex();
+        drbgrandomhashsigfile.close();
+
+        jsonObjsendTCPDatabody["signature"] = strdrbgrandomhashsig;
+    }else{
+        jsonObjsendTCPDatabody["isJoin"] = "no";
+        jsonObjsendTCPDatabody["signature"] = "";
+    }
+
+    for (int fileNumber = 1; fileNumber <= walletAddrCount; ++fileNumber) {
+        QString strkeyNo = QString::number(fileNumber);
+        //钱包地址
+        QString walletAddrpath = currentPath+"/QR-walletAddr" + strkeyNo + ".txt";
+        QFile walletAddrfile(walletAddrpath);
+        if (!walletAddrfile.exists()) continue;  // 如果文件不存在，则跳过
+        walletAddrfile.open(QFile::ReadOnly | QIODevice::Text);
+        QString strwalletAddr = walletAddrfile.readAll();
+        walletAddrfile.close();
+
+        lotteryItem["walletAddr"] = strwalletAddr;
+
+        //drgb随机数哈希值
+        QString signedhashpath = currentPath + "/QR-drbgaesrandomhash" + strkeyNo + ".txt.sig";
+        QFile hashfile(signedhashpath);
+        if (!hashfile.exists()) continue; // 如果文件不存在，则跳过
+        hashfile.open(QFile::ReadOnly | QIODevice::Text);
+        QString strdrbgrandomhash = hashfile.readAll();
+        hashfile.close();
+
+        lotteryItem["randomHash"] = strdrbgrandomhash;
+
+        jsonArrsendTCPDatabodylist.append(lotteryItem);
+    }
+    jsonObjsendTCPDatabody["lotteryList"] = jsonArrsendTCPDatabodylist;
+
+    int bodylength = bodylength = calculateBodySize(jsonObjsendTCPDatabody);
+
+    jsonObjsendTCPDataheader["checksum"] = 21001;
+    jsonObjsendTCPDataheader["messageLength"] = bodylength ;
+    jsonObjsendTCPDataheader["messageName"] = "lotteryStart";
+    jsonObjsendTCPDataheader["messageType"] = "request";
+    jsonObjsendTCPDataheader["version"] = "1.0";
+
+    jsonObjsendTCPData["header"] = jsonObjsendTCPDataheader;
+    jsonObjsendTCPData["body"] = jsonObjsendTCPDatabody;
+
+    QJsonDocument jsonDocsend(jsonObjsendTCPData);
+    QByteArray sendTCPData  = jsonDocsend.toJson() + "#C";
+
+    m_TcpSocket->write(sendTCPData);
+    qDebug() << "TCP发送: " << sendTCPData;
+
+    while (!jsonArrsendTCPDatabodylist.isEmpty()) {
+        jsonArrsendTCPDatabodylist.removeAt(0);
+    }
+
+    jsonObjsendTCPDataheader = QJsonObject();
+    jsonObjsendTCPDatabody = QJsonObject();
+    lotteryItem  = QJsonObject();
+
+    if (randomTimer) {
+        randomTimer->start();
+    }
+}
+
+void QRServer::onEndTimeReached()
+{
+    qDebug()<<"时间到，停止相关操作";
+    if (endTimer) {
+        endTimer->stop();
+    }
+    if (randomTimer) {
+        randomTimer->stop();
+    }
+    if (drbgTimer) {
+        drbgTimer->stop();
+    }
+
+    hashSig();
+}
+
+void QRServer::lotteryResult()
+{
+    QString strwinnerwalletAddr = winnerWallet;
+
+    // 循环读取文件
+    bool isMatch = false;
+    for (int i = 1; i <= walletAddrCount && !isMatch; ++i) {
+        QString strkeyNo = QString::number(i);
+
+        QString walletAddrPath = currentPath+"/QR-walletAddr" + strkeyNo + ".txt";
+        QFile walletAddrfile(walletAddrPath);
+        if (walletAddrfile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QString strwalletAddr = walletAddrfile.readAll();
+            if (strwalletAddr == strwinnerwalletAddr) {
+                // 找到匹配的文件，停止循环
+                isMatch = true;
+                qDebug() << "找到匹配的编号: " << strkeyNo;
+                // 读取对应编号的随机数文件内容
+                QString sigrandompath = currentPath + "/QR-drbgaesrandom" + strkeyNo + ".txt.sig";
+                QFile randomfile(sigrandompath);
+                if (randomfile.open(QIODevice::ReadOnly)) {
+                    QByteArray arrdrbgRandom = randomfile.readAll();
+                    QString strdrbgRandom = arrdrbgRandom.toHex();
+                    randomfile.close();
+
+                    // 分割随机数并计算数据包数量
+                    packetCount = (strdrbgRandom.length() + packetSize - 1) / packetSize;
+
+                    // 发送数据包
+                    packetTimer = new QTimer;
+                    packetTimer->setSingleShot(true);//设置为单次触发
+                    packetTimer->setInterval(0);//触发时间，单位：毫秒
+                    packetTimer->start();
+                    connect(packetTimer,&QTimer::timeout,[=]()mutable{
+                        int startIndex = packetNumber * packetSize;
+                        int endIndex = qMin((packetNumber + 1) * packetSize, strdrbgRandom.length());
+                        QString packetData = strdrbgRandom.mid(startIndex, endIndex - startIndex);
+
+                        jsonObjsendTCPDatabody["random"] = packetData;
+                        jsonObjsendTCPDatabody["totalPackets"] = packetCount;
+                        jsonObjsendTCPDatabody["currentPacket"] = packetNumber + 1;
+                        jsonObjsendTCPDatabody["winnerWallet"] = winnerWallet;
+
+                        int bodylength = calculateBodySize(jsonObjsendTCPDatabody);
+
+                        jsonObjsendTCPDataheader["checksum"] = 21002;
+                        jsonObjsendTCPDataheader["messageLength"] = bodylength;
+                        jsonObjsendTCPDataheader["messageName"] = "lotteryResult";
+                        jsonObjsendTCPDataheader["messageType"] = "response";
+                        jsonObjsendTCPDataheader["version"] = "1.0";
+
+                        jsonObjsendTCPData["header"] = jsonObjsendTCPDataheader;
+                        jsonObjsendTCPData["body"] = jsonObjsendTCPDatabody;
+
+                        QJsonDocument jsonDocsend(jsonObjsendTCPData);
+                        QByteArray sendTCPData = jsonDocsend.toJson() + "#C";
+
+                        m_TcpSocket->write(sendTCPData);
+                        qDebug() << "TCP发送: lotteryResult packet" << packetNumber + 1 << "of" << packetCount << "OK";
+                        qDebug() << sendTCPData.size();
+                        ++packetNumber;
+
+                        jsonObjsendTCPDataheader = QJsonObject();
+                        jsonObjsendTCPDatabody = QJsonObject();
+                    });
+
+                } else {
+                    qDebug() << "没有找到随机数文件: " << sigrandompath;
+                }
+            }
+            walletAddrfile.close();
+        } else {
+            qDebug() << "打开文件失败: " << walletAddrPath;
+        }
+    }
+}
+
+void QRServer::loginVqr()
+{
+    jsonObjsendTCPDatabody["qrId"] = macAddress;
+
+    //钱包地址
+    QString walletAddrPath = currentPath+"/QR-walletAddr1.txt";
+    QFile walletAddrfile(walletAddrPath);
+    walletAddrfile.open(QFile::ReadOnly);
+    QString strwalletAddr = walletAddrfile.readAll();
+    walletAddrfile.close();
+    jsonObjsendTCPDatabody["walletAddr"] = strwalletAddr;
+
+    //QR设备32位公钥
+    QString pubkeypath = currentPath+"/QR-pubKey1.txt";
+    QFile pubkeyfile(pubkeypath);
+    pubkeyfile.open(QFile::ReadOnly);
+    QByteArray arrpubKey = pubkeyfile.readAll();
+    QString strpubKey = arrpubKey.toHex();
+    pubkeyfile.close();
+    jsonObjsendTCPDatabody["pubKey"] = strpubKey;
+
+    //签名
+    QString walletAddrsigpath = currentPath+"/QR-walletAddr1.txt.sig";//loginconfighash签名文件路径
+    QFile walletAddrsigfile(walletAddrsigpath);
+    walletAddrsigfile.open(QFile::ReadOnly);
+    QByteArray arrwalletAddrsig = walletAddrsigfile.readAll();
+    QString strwalletAddrsig = arrwalletAddrsig.toHex();
+    walletAddrsigfile.close();
+    jsonObjsendTCPDatabody["signature"] = strwalletAddrsig;
+
+    int bodylength = bodylength = calculateBodySize(jsonObjsendTCPDatabody);
+
+    jsonObjsendTCPDataheader["checksum"] = 21004;
+    jsonObjsendTCPDataheader["messageLength"] = bodylength ;
+    jsonObjsendTCPDataheader["messageName"] = "loginVqr";
+    jsonObjsendTCPDataheader["messageType"] = "request";
+    jsonObjsendTCPDataheader["version"] = "1.0";
+
+    jsonObjsendTCPData["header"] = jsonObjsendTCPDataheader;
+    jsonObjsendTCPData["body"] = jsonObjsendTCPDatabody;
+
+    QJsonDocument jsonDocsend(jsonObjsendTCPData);
+    QByteArray sendTCPData  = jsonDocsend.toJson() + "#C";
+
+    m_TcpSocket->write(sendTCPData);
+    qDebug() << "TCP发送: " << sendTCPData;
+
+    jsonObjsendTCPDataheader = QJsonObject();
+    jsonObjsendTCPDatabody = QJsonObject();
+}
+
+void QRServer::getwalletAddrSig()
+{
+    int fileNumber = 1;
+    sigTimer = new QTimer;
+    sigTimer->setSingleShot(false);//设置为非单次触发
+    sigTimer->setInterval(100);//触发时间，单位：毫秒
+    sigTimer->start();//触发时间，单位：毫秒
+
+    connect(sigTimer,&QTimer::timeout,[=]()mutable{
+        if (fileNumber > walletAddrCount) {
+            sigTimer->stop();
+            qDebug() << "注册签名已生成完毕";
+
+            ipfileExists();
+        }else{
+            QString strkeyNo = QString::number(fileNumber);
+            walletAddrPath = currentPath+"/QR-walletAddr" + strkeyNo + ".txt";
+            walletAddrsigPath = currentPath + "/QR-walletAddr" + strkeyNo + ".txt.sig";
+            walletAddrSig();
+
+            fileNumber++;
+        }
+    });
+}
+
+void QRServer::walletAddrSig()
+{
+    if (!global_port.open(QIODevice::ReadWrite)){
+        qDebug() << "无法打开串口，错误：" << global_port.errorString();
+        digitalWrite(0, HIGH);
+        digitalWrite(2, LOW);
+        digitalWrite(3, LOW);
+        return;
+    }
+
+    QFile walletAddrfile(walletAddrPath);
+    walletAddrfile.open(QFile::ReadOnly);
+    QByteArray arrwalletAddr = walletAddrfile.readAll();
+    arrwalletAddr = arrwalletAddr + macAddress.toLatin1();
+    QByteArray registerHash = QCryptographicHash::hash(arrwalletAddr, QCryptographicHash::Sha256);
+
+    QByteArray send_SH;
+    send_SH.resize(3);
+    send_SH[0]= 0x53;//S
+    send_SH[1]= 0x48;//H
+    send_SH[2]= 1;
+    global_port.write(send_SH + registerHash);
+
+    connect(&global_port,&QSerialPort::readyRead,this,[=](){
+        QByteArray arrwalletAddrsigdata = global_port.readAll();
+
+        QFile walletAddrsigfile(walletAddrsigPath);
+        walletAddrsigfile.open(QFile::WriteOnly);
+        walletAddrsigfile.write(arrwalletAddrsigdata);
+        walletAddrsigfile.close();
+
+        disconnect(&global_port,&QSerialPort::readyRead,this,nullptr);
+        global_port.close();
+    });
+}
+
+void QRServer::registerWallet()
+{
+    jsonObjsendTCPDatabody["qrId"] = macAddress;
+
+    for (int fileNumber = 2; fileNumber <= walletAddrCount; ++fileNumber) {
+        QString strkeyNo = QString::number(fileNumber);
+        //钱包地址
+        QString walletAddrPath = currentPath+"/QR-walletAddr" + strkeyNo + ".txt";
+        QFile walletAddrfile(walletAddrPath);
+        if (!walletAddrfile.exists()) continue;  // 如果文件不存在，则跳过
+        walletAddrfile.open(QFile::ReadOnly | QIODevice::Text);
+        QString strwalletAddr = walletAddrfile.readAll();
+        walletAddrfile.close();
+
+        lotteryItem["walletAddr"] = strwalletAddr;
+
+        //QR设备32位公钥
+        QString pubkeypath = currentPath + "/QR-pubKey" + strkeyNo + ".txt";
+        QFile pubkeyfile(pubkeypath);
+        if (!pubkeyfile.exists()) continue; // 如果文件不存在，则跳过
+        pubkeyfile.open(QFile::ReadOnly);
+        QByteArray arrpubKey = pubkeyfile.readAll();
+        QString strpubKey = arrpubKey.toHex();
+        pubkeyfile.close();
+
+        lotteryItem["walletPubKey"] = strpubKey;
+
+        //注册钱包地址签名
+        QString walletAddrsigpath = currentPath + "/QR-walletAddr" + strkeyNo + ".txt.sig";
+        QFile walletAddrsigfile(walletAddrsigpath);
+        walletAddrsigfile.open(QFile::ReadOnly);
+        QByteArray arrwalletAddrsig = walletAddrsigfile.readAll();
+        QString strwalletAddrsig = arrwalletAddrsig.toHex();
+        walletAddrsigfile.close();
+
+        lotteryItem["signature"] = strwalletAddrsig;
+
+        jsonArrsendTCPDatabodylist.append(lotteryItem);
+    }
+    jsonObjsendTCPDatabody["walletList"] = jsonArrsendTCPDatabodylist;
+
+    int bodylength = bodylength = calculateBodySize(jsonObjsendTCPDatabody);
+
+    jsonObjsendTCPDataheader["checksum"] = 21005;
+    jsonObjsendTCPDataheader["messageLength"] = bodylength ;
+    jsonObjsendTCPDataheader["messageName"] = "registerWallet";
+    jsonObjsendTCPDataheader["messageType"] = "request";
+    jsonObjsendTCPDataheader["version"] = "1.0";
+
+    jsonObjsendTCPData["header"] = jsonObjsendTCPDataheader;
+    jsonObjsendTCPData["body"] = jsonObjsendTCPDatabody;
+
+    QJsonDocument jsonDocsend(jsonObjsendTCPData);
+    QByteArray sendTCPData  = jsonDocsend.toJson() + "#C";
+
+    m_TcpSocket->write(sendTCPData);
+    qDebug() << "TCP发送: " << sendTCPData;
+
+    while (!jsonArrsendTCPDatabodylist.isEmpty()) {
+        jsonArrsendTCPDatabodylist.removeAt(0);
+    }
+    jsonObjsendTCPDataheader = QJsonObject();
+    jsonObjsendTCPDatabody = QJsonObject();
+    lotteryItem  = QJsonObject();
+}
+
+void QRServer::getLotteryTime()
+{
+    jsonObjsendTCPDatabody["lotteryPhase"] = "";
+    jsonObjsendTCPDatabody["lotteryTime"] = "";
+
+    int bodylength = bodylength = calculateBodySize(jsonObjsendTCPDatabody);
+
+    jsonObjsendTCPDataheader["checksum"] = 21006;
+    jsonObjsendTCPDataheader["messageLength"] = bodylength ;
+    jsonObjsendTCPDataheader["messageName"] = "getLotteryTime";
+    jsonObjsendTCPDataheader["messageType"] = "request";
+    jsonObjsendTCPDataheader["version"] = "1.0";
+
+    jsonObjsendTCPData["header"] = jsonObjsendTCPDataheader;
+    jsonObjsendTCPData["body"] = jsonObjsendTCPDatabody;
+
+    QJsonDocument jsonDocsend(jsonObjsendTCPData);
+    QByteArray sendTCPData  = jsonDocsend.toJson() + "#C";
+
+    m_TcpSocket->write(sendTCPData);
+    qDebug() << "TCP发送: " << sendTCPData;
+
+    jsonObjsendTCPDataheader = QJsonObject();
+    jsonObjsendTCPDatabody = QJsonObject();
+}
+
+QString QRServer::keccak_256(const QString &input)
+{
     QCryptographicHash hash(QCryptographicHash::Keccak_256);
     hash.addData(input.toUtf8());
     return hash.result().toHex();
 }
 
-QString QRServer::Erc55checksum(const QString &address){
+QString QRServer::Erc55checksum(const QString &address)
+{
     QString checksum = keccak_256(address).mid(0,8);
-    QString erc55addr="0x"+address;
-    for(int i=0;i<40;++i){
-        int sum =i%2==0? address[i+2].toLatin1() -'0':address[i+2].toLatin1()-'a'+10;
-        sum+= i%2==0?(checksum[i/2].toLatin1()-'0')*16:(checksum[i/2].toLatin1()-'a'+10)*16;
-        sum+=1%2==0?checksum[i/2+1].toLatin1()-'0':checksum[i/2+1].toLatin1()-'a'+10;
-        if(sum%2==0){
-            erc55addr[i+2]=erc55addr[i+2].toLower();
+    QString erc55addr = "0x"+address;
+    for(int i = 0;i<40;++i){
+        int sum = i%2 == 0? address[i+2].toLatin1() -'0':address[i+2].toLatin1()-'a'+10;
+        sum += i%2 == 0?(checksum[i/2].toLatin1()-'0')*16:(checksum[i/2].toLatin1()-'a'+10)*16;
+        sum += 1%2 == 0?checksum[i/2+1].toLatin1()-'0':checksum[i/2+1].toLatin1()-'a'+10;
+        if(sum%2 == 0){
+            erc55addr[i+2] = erc55addr[i+2].toLower();
         }else{
-            erc55addr[i+2]=erc55addr[i+2].toUpper();
+            erc55addr[i+2] = erc55addr[i+2].toUpper();
         }
     }
     return erc55addr;
+}
+
+void QRServer::saveHashToFile(const QString &hashvalue, const QString &hashfilepath)
+{
+    QFile hashFile(hashfilepath);
+    if (hashFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QTextStream out(&hashFile);
+        out << hashvalue;
+    }
+}
+
+int QRServer::calculateBodySize(const QJsonObject& bodyObject)
+{
+    // 使用 QJsonDocument 来序列化 QJsonObject
+    QJsonDocument doc(bodyObject);
+    // 将 QJsonDocument 转换为 QByteArray
+    QByteArray byteArray = doc.toJson(QJsonDocument::Compact);
+    // 返回 QByteArray 的大小
+    return byteArray.size();
+}
+
+// 初始化文件状态
+void QRServer::initializeFileStatus(const QString &filePath) {
+    QFile file(filePath);
+    if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QTextStream out(&file);
+        // 写入文件头
+        out << "FileNumber,Status\n";
+        // 初始化编号1-10的状态为0
+        for (int i = 1; i <= 10; ++i) {
+            out << i << ",0\n";
+        }
+        file.close();
+    } else {
+        qDebug() << "无法打开文件进行写：" << filePath;
+    }
+}
+
+// 更新文件状态
+void QRServer::updateFileStatus(const QString &filePath, int fileNumber, int status) {
+    QFile file(filePath);
+    if (file.open(QIODevice::ReadWrite | QIODevice::Text)) {
+        QTextStream in(&file);
+        QString line;
+        bool found = false;
+        // 创建一个临时文件来存储更新后的内容
+        QFile tempFile(filePath + ".tmp");
+        if (tempFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QTextStream out(&tempFile);
+            while (!in.atEnd()) {
+                line = in.readLine();
+                QStringList parts = line.split(",");
+                if (parts.size() == 2 && parts[0].toInt() == fileNumber) {
+                    // 更新指定编号的状态
+                    out << fileNumber << "," << status << "\n";
+                    found = true;
+                } else {
+                    out << line << "\n";
+                }
+            }
+            if (!found) {
+                qDebug() << "文件编号" << fileNumber << "在文件中找不到。";
+            }
+            tempFile.close();
+            file.close();
+            // 替换原文件
+            file.remove();
+            tempFile.rename(filePath);
+        } else {
+            qDebug() << "无法打开临时文件进行写入。";
+        }
+    } else {
+        qDebug() << "无法打开文件进行读/写：" << filePath;
+    }
+}
+
+// 读取状态为0或2的编号
+QVector<int> QRServer::readProcessedFileNumbers(const QString &filePath) {
+    QVector<int> processedNumbers;
+    QFile file(filePath);
+    if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        QTextStream in(&file);
+        QString line;
+        while (!in.atEnd()) {
+            line = in.readLine();
+            QStringList parts = line.split(",");
+            if (parts.size() >= 2) {
+                bool ok;
+                int number = parts[0].toInt(&ok);
+                int status = parts[1].toInt(&ok);
+                if (ok && (status == 0 || status == 2)) {
+                    processedNumbers.append(number);
+                }
+            }
+        }
+        file.close();
+    } else {
+        qDebug() << "无法打开文件进行读取:" << filePath;
+    }
+    return processedNumbers;
 }
