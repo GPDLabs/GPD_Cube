@@ -2,7 +2,9 @@
 #include "qrserver.h"
 #include <iostream>
 
+QRServer *server;
 QMutex mutex;
+
 void outputLog(QtMsgType type, const QMessageLogContext &context, const QString &msg)
 {
     mutex.lock();
@@ -38,7 +40,7 @@ void outputLog(QtMsgType type, const QMessageLogContext &context, const QString 
     QString current_date = QDateTime::currentDateTime().toString("yyyy-MM-dd");
     QString message = QString("%1 %2 %3").arg(current_datetime).arg(text).arg(msg);//.arg(context_info).arg(msg);
 
-    QString logName = QString("log_%1.txt").arg(current_date);
+    QString logName = QString("QR-%1.log").arg(current_date);
     QFile file(logName);
     if (file.open(QIODevice::WriteOnly | QIODevice::Append)) {
         QTextStream text_stream(&file);
@@ -65,7 +67,35 @@ void outputLog(QtMsgType type, const QMessageLogContext &context, const QString 
 
     mutex.unlock();
 }
-// 信号处理器函数
+
+void deleteOldLogFiles(int daysToKeep) {
+    mutex.lock();
+
+    // 获取当前日期
+    QDateTime currentDateTime = QDateTime::currentDateTime();
+    // 计算删除日志文件的日期界限
+    QDateTime deleteBefore = currentDateTime.addDays(-daysToKeep);
+
+    // 获取日志文件所在目录
+    QDir logDir(QDir::currentPath());
+    // 设置过滤器，只处理.log文件
+    QStringList filters;
+    filters << "*.log";
+    logDir.setNameFilters(filters);
+
+    // 遍历所有.log文件
+    QFileInfoList logFiles = logDir.entryInfoList();
+    for (const QFileInfo &fileInfo : logFiles) {
+        // 检查文件的最后修改时间是否早于删除界限
+        if (fileInfo.lastModified() < deleteBefore) {
+            // 删除文件
+            logDir.remove(fileInfo.fileName());
+        }
+    }
+
+    mutex.unlock();
+}
+
 void signalHandler(int signal) {
     std::fprintf(stderr, "程序被强制结束，信号编号：%d\n", signal);
     digitalWrite(0, HIGH);
@@ -79,7 +109,7 @@ void signalHandler(int signal) {
     QString current_date = QDateTime::currentDateTime().toString("yyyy-MM-dd");
     QString logMessage = QString("%1 %2").arg(current_datetime).arg(message);
 
-    QString logName = QString("QR-log_%1.txt").arg(current_date);
+    QString logName = QString("QR-%1.log").arg(current_date);
     QFile file(logName);
     if (file.open(QIODevice::WriteOnly | QIODevice::Append)) {
         QTextStream text_stream(&file);

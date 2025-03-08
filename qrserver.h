@@ -25,12 +25,18 @@
 #include <QTime>
 #include <wiringPi.h>
 #include <signal.h>
+#include "download.h"
+#include "checkversion.h"
+#include "globalval.h"
+#include "handleziptype.h"
 
 static const QLatin1String serviceUuid("e8e10f95-1a70-4b27-9ccf-02010264e9c8");
 extern "C" {
 int nist_randomness_evaluate(unsigned char* rnd);
 }
-
+class GlobalVal;
+class CheckVersion;
+class Download;
 class QRServer : public QObject
 {
     Q_OBJECT
@@ -39,31 +45,9 @@ public:
     explicit QRServer(QObject *parent = nullptr);
 
     ~QRServer();
-
     void startServer(const QBluetoothAddress &localAdapter = QBluetoothAddress());
+    void onUpgrade();
     void stopServer();
-    void openwifi();
-    void getwalletAddr();
-    void walletAddrSig();
-    void getwalletAddrSig();
-    void addKey();
-    void decompressKeytowalletAddr();
-    void getRandom();
-    void getDrbgRandom();
-    void testRandomFile();
-    void hashSig();
-    void saveHashToFile(const QString &hashvalue, const QString &hashfilepath);
-    void startTcp();
-    void ipfileExists();
-    void processReceivedData(const QByteArray &data);
-    void loginVqr();
-    void registerWallet();
-    void getLotteryTime();
-    void lotteryStart();
-    void lotteryResult();
-    void initializeFileStatus(const QString &filePath);
-    void updateFileStatus(const QString &filePath, int fileNumber, int status);
-    QVector<int> readProcessedFileNumbers(const QString &filePath);
 
 signals:
     void messageReceived(const QString &sender, const QString &message);
@@ -84,7 +68,41 @@ private slots:
     void onEndTimeReached();
 
 private:
+    void openWifi();
+    void getWalletAddr();
+    void walletAddrSig();
+    void getWalletAddrSig();
+    void addKey(QString strCount);
+    void decompressKeytowalletAddr(QString strCount);
+    void getRandom();
+    void getDrbgRandom();
+    void testRandomFile();
+    void hashSig();
+    void saveHashToFile(const QString &hashvalue, const QString &hashfilepath);
+    void startTcp();
+    void ipfileExists();
+    void processReceivedData(const QByteArray &data);
+    void loginVqr();
+    void registerWallet();
+    void getLotteryTime();
+    void lotteryStart();
+    void lotteryResult();
+    void initializeFileStatus(const QString &filePath);
+    void updateFileStatus(const QString &filePath, int fileNumber, int status);
+    QVector<int> readProcessedFileNumbers(const QString &filePath);
+    void writeSysVersion();
+    void syncVersion();
+    void startMainApp();
+    void Delay(unsigned int msec);
+    void openLed(int pin1,int value1,int pin2,int value2,int pin3,int value3);
+    void blinkLed(int pin1,int delayTime,int pin2,int pin3);
+    void setupLogDeletion(int intervalDays, int daysToKeep);
+
     QRServer *server;
+    Download *download;
+    HandleZipType *handleZip;
+    CheckVersion *cv;
+
     QBluetoothServer *m_rfcommServer;
     QBluetoothServiceInfo m_serviceInfo;
     QList<QBluetoothSocket *> m_clientSockets;
@@ -104,13 +122,12 @@ private:
     QString n_drbgrandomhashPath;
     QString StatusPath;
 
-    QString strkeyNo;
-    QString strpubKey;
-    QString strwalletAddr;
     QString strlotteryTime;
     QString winnerWallet;
     QString keccak_256(const QString &input);
     QString Erc55checksum(const QString &address);
+
+    QString SysVersion = "1.0.0";
 
     QJsonDocument jsonDocreceiveBTData;//收到的json格式文档
     QJsonObject jsonObjreceiveBTData;//收到的json格式对象
@@ -143,13 +160,11 @@ private:
 
     QTimer *drbgTimer;
     QTimer *endTimer;
-    QTimer *ConnectTimer;
-    QTimer *walletAddrTimer;
+    QTimer *connectTimer;
     QTimer *randomTimer;
-    QTimer *sigTimer;
-    QTimer *checkTimer;
     QTimer *packetTimer;
     QTimer *waitForNextPacketTimer;
+    QTimer *ledTimer;
 
     int randomcount = 1;
     int packetCount;
@@ -160,4 +175,5 @@ private:
 };
 void outputLog(QtMsgType type, const QMessageLogContext &context, const QString &msg);//输出日志
 void signalHandler(int signal);
+void deleteOldLogFiles(int daysToKeep);
 #endif // QRSERVER_H
